@@ -506,72 +506,77 @@ else:
 # ======================= Pace Curve — includes Finish split =================
 st.markdown("## Pace Curve — field average (black) + Top 8 finishers (Finish split included)")
 
-# Build ordered segments from markers (include 0 for finish)
-markers = sorted(set(grid_markers + [0]), reverse=True)  # e.g. [1000,800,600,400,200,0]
-if len(markers) == 0:
-    st.info("No segments to draw the pace curve.")
-else:
-    segs = []
-    for i, start in enumerate(markers):
-        end = markers[i + 1] if (i + 1) < len(markers) else None
-        if end is None:
-            continue
-        seg_len = float(start - end) if end > 0 else 200.0  # final 200→Finish
-        if seg_len <= 0:
-            continue
-        segs.append((start, end, seg_len))  # left = early, right = late
+# Ensure we have a synthetic 0_Time from Finish_Time for the last 200 → Finish
+work["0_Time"] = as_num(work.get("Finish_Time", np.nan))
 
-    if len(segs) == 0:
+# Build ordered markers including 0 for finish, e.g. [1000, 800, 600, 400, 200, 0]
+markers = sorted(set(grid_markers + [0]), reverse=True)
+
+if len(markers) < 2:
+    st.info("Not enough segments to draw the pace curve.")
+else:
+    # Build (start, end, length) pairs; last pair must be (200, 0, 200)
+    segs = []
+    for i, start in enumerate(markers[:-1]):
+        end = markers[i + 1]
+        seg_len = float(start - end) if end > 0 else 200.0  # force last split to be 200→Finish
+        if seg_len > 0:
+            segs.append((start, end, seg_len))
+
+    if not segs:
         st.info("Could not infer segment lengths.")
     else:
-        seg_cols = []
-        for (start, end, seg_len) in segs:
-            if end == 0:
-                seg_cols.append("0_Time")
-                work["0_Time"] = as_num(work.get("Finish_Time", np.nan))
-            else:
-                seg_cols.append(f"{start}_Time")
-
+        # Assemble times and speeds for each segment, including 0_Time for finish
         times_df = pd.DataFrame(index=work.index)
         for (start, end, seg_len) in segs:
-            c = "0_Time" if end == 0 else f"{start}_Time"
-            times_df[c] = as_num(work.get(c, work.get(f"{start}_Time", np.nan)))
+            col = f"{start}_Time" if end > 0 else "0_Time"
+            times_df[col] = as_num(work.get(col, np.nan))
+
         speed_df = pd.DataFrame(index=work.index)
         for (start, end, seg_len) in segs:
-            c = "0_Time" if end == 0 else f"{start}_Time"
-            speed_df[c] = seg_len / times_df[c]
+            col = f"{start}_Time" if end > 0 else "0_Time"
+            speed_df[col] = seg_len / times_df[col]
 
+        # Field average
         field_avg = speed_df.mean(axis=0).to_numpy()
 
-        # choose top 8: finish pos if present, else PI
+        # Choose top 8: finish pos if present, else PI
         if "Finish_Pos" in metrics.columns and metrics["Finish_Pos"].notna().any():
             top8 = metrics.sort_values("Finish_Pos").head(8)
         else:
             top8 = metrics.sort_values("PI", ascending=False).head(8)
 
-        x_idx = list(range(len(segs)))
+        # X axis labels (show "200–Finish" for the last)
         def seg_label(s, e):
-            if e == 0: return "200–Finish"
-            return f"{int(s)}–{int(e)}m"
+            return "200–Finish" if e == 0 else f"{int(s)}–{int(e)}m"
         x_labels = [seg_label(s, e) for (s, e, _) in segs]
+        x_idx = list(range(len(segs)))
 
         fig2, ax2 = plt.subplots(figsize=(8.6, 5.2))
+        # Field average — thicker black
         ax2.plot(x_idx, field_avg, linewidth=2.2, color="black", label="Field average", marker=None)
 
+        # Overlay top 8 — thin lines & small markers
         palette = color_cycle(len(top8))
         for i, (_, r) in enumerate(top8.iterrows()):
-            # Rebuild row times mapping (including 0_Time from Finish_Time)
+            # Build a row-wise time vector that includes 0_Time for finish
             row_times = {}
             for (start, end, seg_len) in segs:
-                c = "0_Time" if end == 0 else f"{start}_Time"
-                row_times[c] = as_num(work.loc[work["Horse"] == r.get("Horse")][c]).values[0] \
-                               if ("Horse" in work.columns and not work[work["Horse"] == r.get("Horse")].empty) \
-                               else as_num(r.get(c, np.nan))
+                col = f"{start}_Time" if end > 0 else "0_Time"
+                # Try to read from the original work row for this Horse (if names match), fallback to metrics
+                if "Horse" in work.columns and "Horse" in metrics.columns:
+                    wrow = work[work["Horse"] == r.get("Horse")]
+                    if not wrow.empty and col in wrow.columns:
+                        row_times[col] = as_num(wrow.iloc[0].get(col))
+                    else:
+                        row_times[col] = as_num(r.get(col, np.nan))
+                else:
+                    row_times[col] = as_num(r.get(col, np.nan))
 
             y_vals = []
             for (start, end, seg_len) in segs:
-                c = "0_Time" if end == 0 else f"{start}_Time"
-                t = pd.to_numeric(row_times.get(c, np.nan), errors="coerce")
+                col = f"{start}_Time" if end > 0 else "0_Time"
+                t = pd.to_numeric(row_times.get(col, np.nan), errors="coerce")
                 y_vals.append(seg_len / t if pd.notna(t) and t > 0 else np.nan)
 
             ax2.plot(x_idx, y_vals, linewidth=1.1, marker="o", markersize=2.5,
